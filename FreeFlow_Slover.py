@@ -9,10 +9,11 @@ GRID_SIZE = 5
 NUM_COLORS = 5  # 假設我們有五對顏色點
 
 # 初始化參數
-POPULATION_SIZE = 200
-GENERATIONS = 2000
-MUTATION_RATE = 0.2
+POPULATION_SIZE = 100
+GENERATIONS = 5000
+MUTATION_RATE = 0.5
 TOURNAMENT_SIZE = 5
+global fix
 
 # 初始設定的顏色
 COLORS = ["R", "G", "B", "Y", "O"]  # 紅、綠、藍、黃、橙
@@ -34,11 +35,14 @@ endpoints = {
     "R": [(1, 3), (2, 2)],  # Red
     "O": [(3, 3), (4, 2)],  # Orange
 }
+fix = {}
 # 定義個體
 class Individual:
     def __init__(self):
-        self.genotype = np.random.choice(COLORS, (GRID_SIZE, GRID_SIZE))
-        self.fitness = 0
+        # self.genotype = np.random.choice(COLORS, (GRID_SIZE, GRID_SIZE))
+        # 生成一個空白網格
+        self.genotype = np.full((GRID_SIZE, GRID_SIZE), "", dtype=str)
+        self.fitness = -1
         self.final = 5
         self.finished = False
 
@@ -53,12 +57,15 @@ class Individual:
         
         # 檢查每個顏色的起點與終點是否連通
         path_score = 0
+        connection_penalty = 0  # 未連線的懲罰
         for color, (start, end) in endpoints.items():
             if self.is_connected(color, start, end):
                 path_score += 10
+            else:
+                connection_penalty += 5  # 每個未連線的顏色降低 5 分
         
         # 假設適應度為覆蓋得分和路徑連通性得分的和
-        self.fitness += path_score
+        self.fitness += path_score - connection_penalty
 
         # 計算每個顏色的數量
         color_counts = {color: 0 for color in COLORS}
@@ -73,7 +80,7 @@ class Individual:
 
             if actual_count < required_length:
                 # 如果顏色數量不足，降低適應度
-                self.fitness -= (required_length - actual_count) * 10  # 調整權重可根據實驗結果進行調整
+                self.fitness = 0 # 調整權重可根據實驗結果進行調整
     
         
         self.fitness = max(0, self.fitness)  # 適應度不為負數
@@ -134,6 +141,12 @@ def enforce_fixed_points(individual):
         end_x, end_y = end
         individual.genotype[start_x, start_y] = color
         individual.genotype[end_x, end_y] = color
+    for color, points in fix.items():
+        for point in points:
+            x, y = point
+            individual.genotype[x, y] = color
+    
+
 
 def calculate_shortest_path(start, end):
     queue = deque([(start, 0)])  # (位置, 路徑長度)
@@ -152,6 +165,49 @@ def calculate_shortest_path(start, end):
 
     return float('inf')  # 若無法連接，返回無窮大
 
+def find_initial_fix(individual):
+    def three(a, b, c, d):
+        # 收集所有非空白的鄰居
+        neighbors = [v for v in [a, b, c, d] if v != ""]
+        
+        # 檢查是否至少有三個非空白鄰居
+        if len(neighbors) >= 3:
+            # 計算每個值的出現次數
+            counts = {}
+            for v in neighbors:
+                counts[v] = counts.get(v, 0) + 1
+            
+            # 找出唯一的顏色（不是 "1"）
+            for key, count in counts.items():
+                if key != "1" and count == 1:  # 唯一顏色條件
+                # 檢查是否有兩個 "1"
+                    if counts.get("1", 0) >= 2:  # 確保有至少兩個 "1"
+                        return key  # 返回唯一顏色
+
+        return False
+            
+    # 把indfivial row col 左右各增加一行
+    rows, cols = individual.genotype.shape
+    # 把矩陣都填入1
+    grid_test = np.full((rows + 2, cols + 2), "1", dtype=str)
+    grid_test[1:-1, 1:-1] = individual.genotype
+    # 便利這個grid_test如果上下左右其中有三個不是空白就檢查是不是附近有唯一一個顏色，如果有就填入那個顏色
+    for i in range(1, rows+1):
+        for j in range(1, cols+1):
+            if grid_test[i, j] == "":
+                result = three(grid_test[i-1, j], grid_test[i+1, j], grid_test[i, j-1], grid_test[i, j+1])
+                if result != False:
+                    grid_test[i, j] = result
+                    
+                    # 更新 fix 字典
+                    if result not in fix:
+                        fix[result] = []
+                    fix[result].append((i - 1, j - 1))  # 調整索引使其對應原始網格
+
+    # 將填充後的矩陣放回individual
+    individual.genotype = grid_test[1:-1, 1:-1]               
+                    
+
 # 初始族群生成
 def create_population(size):
     # 計算每個顏色至少需要的格子數（最短路徑長度）
@@ -159,6 +215,7 @@ def create_population(size):
         color_path_lengths[color] = calculate_shortest_path(start, end)
     
     print("每個顏色的最短路徑長度:", color_path_lengths)  # 確認結果
+    
 
     # 初始化族群
     population = []
@@ -172,6 +229,8 @@ def create_population(size):
             individual.genotype[start_x, start_y] = color  # 起點
             individual.genotype[end_x, end_y] = color      # 終點
 
+        # 計算有沒有可以固定的顏色點
+        find_initial_fix(individual)
         # 分配顏色到網格上，確保每種顏色至少有最短路徑長度的格子數
         for color, length in color_path_lengths.items():
             positions = random.sample(range(GRID_SIZE * GRID_SIZE), length)  # 隨機選擇網格位置
@@ -196,15 +255,18 @@ def tournament_selection(population):
     return max(selected, key=lambda ind: ind.fitness)
 
 # 交叉：單點交叉
-def find_fixed_points(endpoints):
+def find_fixed_points(endpoints,fix):
     """
     找出所有顏色的起點和終點，返回一個保護點的集合。
     """
-    fixed_points = set()
+    fixed = set()
     for color, (start, end) in endpoints.items():
-        fixed_points.add(start)
-        fixed_points.add(end)
-    return fixed_points
+        fixed.add(start)
+        fixed.add(end)
+    for color, points in fix.items():
+        for point in points:
+            fixed.add(point)
+    return fixed
 
 def visualize_solution(genotype):
     plt.figure(figsize=(6, 6))
@@ -236,7 +298,7 @@ def crossover(parent1, parent2):
     """
     二維空間的交叉操作，保護起點和終點位置。
     """
-    fixed_points = find_fixed_points(endpoints)
+    fixed_points = find_fixed_points(endpoints,fix)
     child1_genotype = copy.deepcopy(parent1.genotype)
     child2_genotype = copy.deepcopy(parent2.genotype)
 
@@ -273,11 +335,11 @@ def crossover(parent1, parent2):
 def mutate(individual):
     if random.random() < MUTATION_RATE:
         # 找出所有固定的起點和終點位置
-        fixed_points = find_fixed_points(endpoints)
+        fixed_points = find_fixed_points(endpoints,fix)
 
         # 隨機選擇一個區域
         x, y = random.randint(0, GRID_SIZE - 1), random.randint(0, GRID_SIZE - 1)
-        size = random.randint(1, 3)  # 隨機區段大小
+        size = random.randint(1, 4)  # 隨機區段大小
         end_x, end_y = min(x + size, GRID_SIZE), min(y + size, GRID_SIZE)
 
         # 收集非固定點的顏色位置
@@ -313,8 +375,11 @@ def evolve(population):
             child1, child2 = crossover(parent1, parent2)  # 正確接收兩個子代
             mutate(child1)
             mutate(child2)
-            new_population.append(child1)
-            new_population.append(child2)
+            # 這邊檢查child fitness = 0 的直接不加入
+            if child1.fitness != 0:
+                new_population.append(child1)
+            if child2.fitness != 0:
+                new_population.append(child2)
 
         # 更新族群
         population = new_population
